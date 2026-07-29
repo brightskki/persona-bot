@@ -114,23 +114,28 @@ module.exports = async function handler(req, res) {
         const speaker = await selectCommandPersona(argument, history, line);
         const summary = await generateSummary(speaker, history);
         if (summary) {
-          const result = `Прожарка от ${personaLabel(speaker)}:\n${summary}`;
+          const result = `Краткая выжимка от ${personaLabel(speaker)}:\n\n${summary}`;
           await sendMessage(chatId, result, message.message_id);
           await appendHistory(chatId, `${speaker.name}: ${result}`);
         }
         return res.status(200).json({ ok: true });
       }
 
-      const roastMatch = argument.match(/^@([a-zA-Z0-9_]{5,32})(?:\s+([\s\S]*))?$/);
+      const roastMatch = argument.match(/^@([a-zA-Z0-9_]{5,32})\s+@([a-zA-Z0-9_]{5,32})$/);
       if (!roastMatch) {
-        await sendMessage(chatId, 'Формат: /roast @username [кто прожаривает]', message.message_id);
+        await sendMessage(chatId, 'Формат: /roast @от_кого @кого', message.message_id);
         return res.status(200).json({ ok: true });
       }
 
-      const targetUsername = roastMatch[1];
-      const speaker = await selectCommandPersona((roastMatch[2] || '').trim(), history, line);
+      const speakerUsername = roastMatch[1];
+      const targetUsername = roastMatch[2];
+      const speaker = findByTelegramUsername(speakerUsername);
       const targetPersona = findByTelegramUsername(targetUsername);
-      const relation = targetPersona ? speaker.relations?.[targetPersona.name] || '' : '';
+      if (!speaker || !targetPersona) {
+        await sendMessage(chatId, 'Не знаю одного из username. Проверь формат: /roast @от_кого @кого', message.message_id);
+        return res.status(200).json({ ok: true });
+      }
+      const relation = speaker.relations?.[targetPersona.name] || '';
       const roast = await generateRoast(
         speaker,
         { username: targetUsername, persona: targetPersona },
