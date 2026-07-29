@@ -1,7 +1,8 @@
-const { personas, findByNameOrAlias, findAllMentioned } = require('../lib/personas');
-const { appendHistory, getHistory, shouldMakeAutonomousReply } = require('../lib/state');
-const { decideResponder, generateReply } = require('../lib/llm');
-const { sendMessage } = require('../lib/telegram');
+const { personas, findByNameOrAlias, findAllMentioned, findByTelegramUsername } = require('../lib/personas');
+const { appendHistory, getHistory, shouldMakeAutonomousReply, shouldMakeReaction } = require('../lib/state');
+const { decideResponder, generateReply, decideReaction, generateSummary, generateRoast } = require('../lib/llm');
+const { sendMessage, setMessageReaction } = require('../lib/telegram');
+const { formatPersonaReply } = require('../lib/replyFormat');
 
 // Собирает справку "как отвечающая персона относится к другим людям,
 // упомянутым в текущем разговоре" — из поля relations в personas.json.
@@ -19,6 +20,19 @@ function buildRelationsContext(speaker, history, lastMessage) {
     .filter(Boolean);
 
   return lines.join('\n');
+}
+
+async function selectCommandPersona(personaHint, history, line) {
+  const explicitlySelected = personaHint ? findByNameOrAlias(personaHint) : null;
+  if (explicitlySelected) return explicitlySelected;
+
+  const decision = await decideResponder(personas, history, line);
+  return personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase())
+    || personas[Math.floor(Math.random() * personas.length)];
+}
+
+function personaLabel(persona) {
+  return persona.label || persona.name.split(/\s+/)[0];
 }
 
 module.exports = async function handler(req, res) {
@@ -90,8 +104,51 @@ module.exports = async function handler(req, res) {
     const line = `${fromName}: ${text}`;
     await appendHistory(chatId, line);
 
+    const commandMatch = text.match(/^\/(summary|roast)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+    if (commandMatch) {
+      const command = commandMatch[1].toLowerCase();
+      const argument = (commandMatch[2] || '').trim();
+      const history = await getHistory(chatId);
+
+      if (command === 'summary') {
+        const speaker = await selectCommandPersona(argument, history, line);
+        const summary = await generateSummary(speaker, history);
+        if (summary) {
+          const result = `Прожарка от ${personaLabel(speaker)}:\n${summary}`;
+          await sendMessage(chatId, result, message.message_id);
+          await appendHistory(chatId, `${speaker.name}: ${result}`);
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      const roastMatch = argument.match(/^@([a-zA-Z0-9_]{5,32})(?:\s+([\s\S]*))?$/);
+      if (!roastMatch) {
+        await sendMessage(chatId, 'Формат: /roast @username [кто прожаривает]', message.message_id);
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetUsername = roastMatch[1];
+      const speaker = await selectCommandPersona((roastMatch[2] || '').trim(), history, line);
+      const targetPersona = findByTelegramUsername(targetUsername);
+      const relation = targetPersona ? speaker.relations?.[targetPersona.name] || '' : '';
+      const roast = await generateRoast(
+        speaker,
+        { username: targetUsername, persona: targetPersona },
+        history,
+        relation
+      );
+
+      if (roast) {
+        const result = `Прожарка @${targetUsername} от ${personaLabel(speaker)}:\n${roast}`;
+        await sendMessage(chatId, result, message.message_id);
+        await appendHistory(chatId, `${speaker.name}: ${result}`);
+      }
+      return res.status(200).json({ ok: true });
+    }
+
     const mentionedPersona = findByNameOrAlias(text);
     let personaToReply = null;
+    let shouldReact = false;
 
     if (chatType === 'private') {
       // В личке хозяин может тестировать ответы без риска написать в группу.
@@ -132,6 +189,9 @@ module.exports = async function handler(req, res) {
           personaToReply = personas[Math.floor(Math.random() * personas.length)];
           console.log(`🎲 Random chance triggered! Picked persona: "${personaToReply.name}"`);
         }
+      } else if (!text.startsWith('/')) {
+        shouldReact = await shouldMakeReaction(chatId);
+        console.log(`✨ Reaction interval: ${shouldReact ? 'reached' : 'not reached'}`);
       }
     }
 
@@ -143,14 +203,21 @@ module.exports = async function handler(req, res) {
 
       if (reply) {
         console.log(`🚀 Reply generated successfully: "${reply}". Sending to Telegram...`);
-        // Без служебных подписей вроде «Женя бы сказал»: персона говорит сама.
-        await sendMessage(chatId, reply, mentionedPersona || isReplyToBot || isMentionedBot ? message.message_id : undefined);
-        await appendHistory(chatId, `${personaToReply.name}: ${reply}`);
+        const formattedReply = formatPersonaReply(personaToReply, reply);
+        await sendMessage(chatId, formattedReply, mentionedPersona || isReplyToBot || isMentionedBot ? message.message_id : undefined);
+        await appendHistory(chatId, `${personaToReply.name}: ${formattedReply}`);
       } else {
         console.log('⚠️ LLM returned empty reply.');
       }
     } else {
-      console.log('ℹ️ No persona chosen to reply for this message.');
+      if (shouldReact) {
+        const history = await getHistory(chatId);
+        const emoji = await decideReaction(history, line);
+        const reactionSet = await setMessageReaction(chatId, message.message_id, emoji);
+        console.log(reactionSet ? `✨ Set reaction ${emoji}` : `⚠️ Could not set reaction ${emoji}`);
+      } else {
+        console.log('ℹ️ No persona chosen to reply for this message.');
+      }
     }
 
     return res.status(200).json({ ok: true });
