@@ -106,6 +106,8 @@ vercel env add OPENROUTER_API_KEY
 vercel env add UPSTASH_REDIS_REST_URL
 vercel env add UPSTASH_REDIS_REST_TOKEN
 vercel env add GROUP_CHAT_ID
+vercel env add OWNER_TELEGRAM_ID
+vercel env add BOT_TELEGRAM_ID
 ```
 
 После добавления env — передеплой, чтобы они подхватились:
@@ -143,7 +145,7 @@ node scripts/setWebhook.js https://твой-проект.vercel.app/api/webhook
                                             │
                                             ├─ в тексте есть имя одной из персон? → отвечает от её лица сразу
                                             │
-                                            ├─ реплай на сообщение бота (без имени)? → отвечает (по умолчанию первой персоной)
+                                            ├─ @username бота или реплай на его сообщение? → отвечает сразу
                                             │
                                             └─ иначе, раз в случайные 10–20 сообщений:
                                                   cheap-модель выбирает персону
@@ -159,6 +161,7 @@ node scripts/setWebhook.js https://твой-проект.vercel.app/api/webhook
 
 - `HISTORY_LIMIT` — сколько последних сообщений чата держать в контексте (по умолчанию 20).
 - `AUTONOMOUS_REPLY_MIN_MESSAGES` / `AUTONOMOUS_REPLY_MAX_MESSAGES` — границы случайного интервала самостоятельных реплик (по умолчанию 10 и 20).
+- `MAX_REPLY_CHARS` — жёсткая максимальная длина ответа (по умолчанию 140 символов, одна строка).
 - `CHEAP_MODEL` / `MAIN_MODEL` — можно поставить разные модели: дешёвую для решения "отвечать ли" и более мощную для самой генерации.
 - Логика "стоит ли отвечать" — в `lib/llm.js`, функция `decideShouldReply`. Промпт там можно донастроить под характер конкретного персонажа (например, сделать его более/менее болтливым).
 

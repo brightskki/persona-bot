@@ -75,6 +75,9 @@ module.exports = async function handler(req, res) {
     }
 
     const botUsername = process.env.BOT_USERNAME || '';
+    const isMentionedBot = Boolean(
+      botUsername && new RegExp(`(^|\\s)@${botUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'iu').test(text)
+    );
 
     const repliedFrom = message.reply_to_message?.from;
     const isReplyToBot = Boolean(
@@ -97,8 +100,20 @@ module.exports = async function handler(req, res) {
       console.log(`👤 Mentioned persona matched: "${mentionedPersona.name}"`);
       personaToReply = mentionedPersona;
     } else if (isReplyToBot) {
-      console.log(`💬 Message is reply to bot, picking default persona "${personas[0]?.name}"`);
-      personaToReply = personas[0];
+      // Продолжаем от лица того же человека, чью предыдущую реплику цитируют.
+      const history = await getHistory(chatId);
+      const repliedText = message.reply_to_message.text || '';
+      const previousPersonaLine = [...history]
+        .reverse()
+        .find((entry) => entry.endsWith(`: ${repliedText}`));
+      personaToReply = personas.find((p) => previousPersonaLine?.startsWith(`${p.name}:`)) || personas[0];
+      console.log(`💬 Message is reply to bot, continuing as "${personaToReply?.name}"`);
+    } else if (isMentionedBot) {
+      // @username бота — явный вызов: отвечаем сразу, не ждём интервала 10–20 сообщений.
+      const history = await getHistory(chatId);
+      const decision = await decideResponder(personas, history, line);
+      personaToReply = personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase()) || personas[0];
+      console.log(`📣 Bot mentioned directly, replying as "${personaToReply?.name}"`);
     } else {
       const isAutonomousTurn = await shouldMakeAutonomousReply(chatId);
       console.log(`🎲 Autonomous reply interval: ${isAutonomousTurn ? 'reached' : 'not reached'}`);
@@ -129,7 +144,7 @@ module.exports = async function handler(req, res) {
       if (reply) {
         console.log(`🚀 Reply generated successfully: "${reply}". Sending to Telegram...`);
         // Без служебных подписей вроде «Женя бы сказал»: персона говорит сама.
-        await sendMessage(chatId, reply, mentionedPersona || isReplyToBot ? message.message_id : undefined);
+        await sendMessage(chatId, reply, mentionedPersona || isReplyToBot || isMentionedBot ? message.message_id : undefined);
         await appendHistory(chatId, `${personaToReply.name}: ${reply}`);
       } else {
         console.log('⚠️ LLM returned empty reply.');
