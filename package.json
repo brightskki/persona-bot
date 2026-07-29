@@ -1,0 +1,14 @@
+{
+  "name": "persona-tg-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "set-webhook": "node scripts/setWebhook.js",
+    "delete-webhook": "node scripts/deleteWebhook.js"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.31.6",
+    "dotenv": "^16.4.5"
+  }
+}

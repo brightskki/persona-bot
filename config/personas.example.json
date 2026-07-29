@@ -1,0 +1,82 @@
+[
+  {
+    "name": "Кирилл",
+    "aliases": ["кирюха", "кир"],
+    "systemPrompt": "Ты — Кирилл. [ОПИШИ: кто он, чем занимается, характер, манера речи, маты/сленг/эмодзи, любимые темы, повторяющиеся шутки и фразочки]",
+    "relations": {
+      "Димаш": "[как Кирилл относится к Димашу, как обращается, общие шутки/темы]",
+      "Ислам": "[аналогично]"
+    },
+    "archive": []
+  },
+  {
+    "name": "Кирилл Старый",
+    "aliases": ["старый"],
+    "systemPrompt": "Ты — Кирилл Старый. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Ислам",
+    "aliases": [],
+    "systemPrompt": "Ты — Ислам. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Димаш",
+    "aliases": [],
+    "systemPrompt": "Ты — Димаш. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Арлан",
+    "aliases": [],
+    "systemPrompt": "Ты — Арлан. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Макс",
+    "aliases": [],
+    "systemPrompt": "Ты — Макс. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Дастан",
+    "aliases": [],
+    "systemPrompt": "Ты — Дастан. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Женя",
+    "aliases": [],
+    "systemPrompt": "Ты — Женя. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Раим",
+    "aliases": [],
+    "systemPrompt": "Ты — Раим. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Надир",
+    "aliases": [],
+    "systemPrompt": "Ты — Надир. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  },
+  {
+    "name": "Даня",
+    "aliases": [],
+    "systemPrompt": "Ты — Даня. [ОПИШИ личность]",
+    "relations": {},
+    "archive": []
+  }
+]
