@@ -1,7 +1,10 @@
 const { personas, findByNameOrAlias, findAllMentioned, findByTelegramUsername } = require('../lib/personas');
-const { appendHistory, getHistory, shouldMakeAutonomousReply, shouldMakeReaction } = require('../lib/state');
+const {
+  appendHistory, getHistory, shouldMakeAutonomousReply, shouldMakeReaction, shouldMakeSelfCorrection,
+  shouldAwardBadge, recordBadgeActivity, takeBadgeCandidate
+} = require('../lib/state');
 const { decideResponder, generateReply, decideReaction, generateSummary, generateRoast } = require('../lib/llm');
-const { sendMessage, setMessageReaction } = require('../lib/telegram');
+const { sendMessage, sendChatAction, setMessageReaction } = require('../lib/telegram');
 const { formatPersonaReply } = require('../lib/replyFormat');
 
 // Собирает справку "как отвечающая персона относится к другим людям,
@@ -33,6 +36,32 @@ async function selectCommandPersona(personaHint, history, line) {
 
 function personaLabel(persona) {
   return persona.label || persona.name.split(/\s+/)[0];
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function typingDelay(text) {
+  return Math.max(2000, Math.min(5000, 1500 + String(text).length * 20));
+}
+
+function makeTypo(text) {
+  const candidates = [...text.matchAll(/[А-Яа-яЁё]{5,}/g)];
+  if (candidates.length === 0) return null;
+  const match = candidates[Math.floor(Math.random() * candidates.length)];
+  const word = match[0];
+  const index = Math.max(1, Math.min(word.length - 2, Math.floor(word.length / 2)));
+  const mistyped = `${word.slice(0, index)}${word[index + 1]}${word[index]}${word.slice(index + 2)}`;
+  return { text: `${text.slice(0, match.index)}${mistyped}${text.slice(match.index + word.length)}`, correction: word };
+}
+
+async function sendPersonaReply(chatId, persona, content, replyToMessageId) {
+  const formatted = formatPersonaReply(persona, content);
+  await sendChatAction(chatId, 'typing');
+  await delay(typingDelay(content));
+  await sendMessage(chatId, formatted.text, replyToMessageId, formatted.parseMode);
+  return formatted.plainText;
 }
 
 module.exports = async function handler(req, res) {
@@ -104,6 +133,12 @@ module.exports = async function handler(req, res) {
     const line = `${fromName}: ${text}`;
     await appendHistory(chatId, line);
 
+    let pendingBadge = null;
+    if (chatType !== 'private' && !text.startsWith('/')) {
+      await recordBadgeActivity(chatId, { userId: fromId, username: fromName, text, timestamp: message.date ? message.date * 1000 : Date.now() });
+      if (await shouldAwardBadge(chatId)) pendingBadge = await takeBadgeCandidate(chatId);
+    }
+
     const commandMatch = text.match(/^\/(summary|roast)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (commandMatch) {
       const command = commandMatch[1].toLowerCase();
@@ -112,11 +147,12 @@ module.exports = async function handler(req, res) {
 
       if (command === 'summary') {
         const speaker = await selectCommandPersona(argument, history, line);
+        await sendChatAction(chatId, 'typing');
         const summary = await generateSummary(speaker, history);
         if (summary) {
-          const result = `Краткая выжимка от ${personaLabel(speaker)}:\n\n${summary}`;
-          await sendMessage(chatId, result, message.message_id);
-          await appendHistory(chatId, `${speaker.name}: ${result}`);
+          const result = `Краткая выжимка:\n\n${summary}`;
+          const plainText = await sendPersonaReply(chatId, speaker, result, message.message_id);
+          await appendHistory(chatId, `${speaker.name}: ${plainText}`);
         }
         return res.status(200).json({ ok: true });
       }
@@ -136,6 +172,7 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
       const relation = speaker.relations?.[targetPersona.name] || '';
+      await sendChatAction(chatId, 'typing');
       const roast = await generateRoast(
         speaker,
         { username: targetUsername, persona: targetPersona },
@@ -144,9 +181,9 @@ module.exports = async function handler(req, res) {
       );
 
       if (roast) {
-        const result = `Прожарка @${targetUsername} от ${personaLabel(speaker)}:\n${roast}`;
-        await sendMessage(chatId, result, message.message_id);
-        await appendHistory(chatId, `${speaker.name}: ${result}`);
+        const result = `Прожарка @${targetUsername}:\n\n${roast}`;
+        const plainText = await sendPersonaReply(chatId, speaker, result, message.message_id);
+        await appendHistory(chatId, `${speaker.name}: ${plainText}`);
       }
       return res.status(200).json({ ok: true });
     }
@@ -154,6 +191,7 @@ module.exports = async function handler(req, res) {
     const mentionedPersona = findByNameOrAlias(text);
     let personaToReply = null;
     let shouldReact = false;
+    let shouldSelfCorrect = false;
 
     if (chatType === 'private') {
       // В личке хозяин может тестировать ответы без риска написать в группу.
@@ -195,8 +233,17 @@ module.exports = async function handler(req, res) {
           console.log(`🎲 Random chance triggered! Picked persona: "${personaToReply.name}"`);
         }
       } else if (!text.startsWith('/')) {
-        shouldReact = await shouldMakeReaction(chatId);
-        console.log(`✨ Reaction interval: ${shouldReact ? 'reached' : 'not reached'}`);
+        shouldSelfCorrect = await shouldMakeSelfCorrection(chatId);
+        if (shouldSelfCorrect) {
+          const history = await getHistory(chatId);
+          const decision = await decideResponder(personas, history, line);
+          personaToReply = personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase())
+            || personas[Math.floor(Math.random() * personas.length)];
+          console.log(`✍️ Self-correction interval reached, picked "${personaToReply?.name}"`);
+        } else {
+          shouldReact = await shouldMakeReaction(chatId);
+          console.log(`✨ Reaction interval: ${shouldReact ? 'reached' : 'not reached'}`);
+        }
       }
     }
 
@@ -204,13 +251,24 @@ module.exports = async function handler(req, res) {
       console.log(`🤖 Generating reply as persona "${personaToReply.name}"...`);
       const history = await getHistory(chatId);
       const relationsContext = buildRelationsContext(personaToReply, history, line);
+      await sendChatAction(chatId, 'typing');
       const reply = await generateReply(personaToReply, history, line, relationsContext);
 
       if (reply) {
         console.log(`🚀 Reply generated successfully: "${reply}". Sending to Telegram...`);
-        const formattedReply = formatPersonaReply(personaToReply, reply);
-        await sendMessage(chatId, formattedReply, mentionedPersona || isReplyToBot || isMentionedBot ? message.message_id : undefined);
-        await appendHistory(chatId, `${personaToReply.name}: ${formattedReply}`);
+        const typo = shouldSelfCorrect ? makeTypo(reply) : null;
+        const sentPlainText = await sendPersonaReply(
+          chatId,
+          personaToReply,
+          typo ? typo.text : reply,
+          mentionedPersona || isReplyToBot || isMentionedBot ? message.message_id : undefined
+        );
+        await appendHistory(chatId, `${personaToReply.name}: ${sentPlainText}`);
+        if (typo) {
+          await delay(1000 + Math.floor(Math.random() * 1001));
+          await sendMessage(chatId, `*${typo.correction}`);
+          await appendHistory(chatId, `${personaToReply.name}: *${typo.correction}`);
+        }
       } else {
         console.log('⚠️ LLM returned empty reply.');
       }
@@ -223,6 +281,13 @@ module.exports = async function handler(req, res) {
       } else {
         console.log('ℹ️ No persona chosen to reply for this message.');
       }
+    }
+
+    if (pendingBadge) {
+      const badge = `🏆 Ачивка получена: «${pendingBadge.title}» — @${pendingBadge.username} ${pendingBadge.reason}.`;
+      await sendMessage(chatId, badge);
+      await appendHistory(chatId, `Система: ${badge}`);
+      console.log(`🏆 Awarded badge ${pendingBadge.title} to @${pendingBadge.username}`);
     }
 
     return res.status(200).json({ ok: true });
