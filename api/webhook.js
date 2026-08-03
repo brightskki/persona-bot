@@ -1,6 +1,8 @@
 const { personas, findByNameOrAlias, findAllMentioned, findByTelegramUsername } = require('../lib/personas');
 const {
-  appendHistory, getHistory, shouldMakeAutonomousReply, shouldMakeReaction, shouldMakeSelfCorrection,
+  appendHistory, getHistory, getChatLevel, setChatLevel, levelLabel,
+  getChatMode, setChatMode, modeLabel, listModes,
+  shouldMakeAutonomousReply, shouldMakeReactionForMessage, shouldMakeSelfCorrection,
   shouldAwardBadge, recordBadgeActivity, takeBadgeCandidate
 } = require('../lib/state');
 const { decideResponder, generateReply, decideReaction, generateSummary, generateRoast } = require('../lib/llm');
@@ -25,17 +27,14 @@ function buildRelationsContext(speaker, history, lastMessage) {
   return lines.join('\n');
 }
 
-async function selectCommandPersona(personaHint, history, line) {
-  const explicitlySelected = personaHint ? findByNameOrAlias(personaHint) : null;
-  if (explicitlySelected) return explicitlySelected;
-
-  const decision = await decideResponder(personas, history, line);
-  return personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase())
-    || personas[Math.floor(Math.random() * personas.length)];
+function pickPersonaFromDecision(decision) {
+  if (!decision?.personaName) return null;
+  return personas.find((p) => p.name.toLowerCase() === decision.personaName.toLowerCase()) || null;
 }
 
-function personaLabel(persona) {
-  return persona.label || persona.name.split(/\s+/)[0];
+function pickRandomPersona() {
+  if (personas.length === 0) return null;
+  return personas[Math.floor(Math.random() * personas.length)];
 }
 
 function delay(ms) {
@@ -139,6 +138,58 @@ module.exports = async function handler(req, res) {
       if (await shouldAwardBadge(chatId)) pendingBadge = await takeBadgeCandidate(chatId);
     }
 
+    const levelMatch = text.match(/^\/level(?:@\w+)?(?:\s+(\d))?$/i);
+    if (levelMatch) {
+      const requested = levelMatch[1];
+      if (requested === undefined) {
+        const current = await getChatLevel(chatId);
+        await sendMessage(
+          chatId,
+          `Текущий level: ${current} — ${levelLabel(current)}\n\n/level 0 — вырублен\n/level 1 — только @ / реплай / имя\n/level 2 — сам раз в ~1000\n/level 3 — сам раз в ~100\n/level 4 — сам раз в ~10\n/level 5 — на каждое сообщение\n\nНа 1–5: @бот, реплай и имя персоны — всегда.`,
+          message.message_id
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const next = await setChatLevel(chatId, requested);
+      if (next === null) {
+        await sendMessage(chatId, 'Укажи число от 0 до 5. Пример: /level 1', message.message_id);
+        return res.status(200).json({ ok: true });
+      }
+
+      await sendMessage(chatId, `Level ${next}: ${levelLabel(next)}`, message.message_id);
+      console.log(`🎚️ Chat ${chatId} level set to ${next}`);
+      return res.status(200).json({ ok: true });
+    }
+
+    const modeMatch = text.match(/^\/mode(?:@\w+)?(?:\s+([a-zA-Z-]+))?$/i);
+    if (modeMatch) {
+      const requested = modeMatch[1];
+      if (!requested) {
+        const current = await getChatMode(chatId);
+        await sendMessage(
+          chatId,
+          `Текущий mode: ${current} — ${modeLabel(current)}\n\n${listModes()}`,
+          message.message_id
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      const next = await setChatMode(chatId, requested);
+      if (!next) {
+        await sendMessage(
+          chatId,
+          `Неизвестный mode. Доступно:\n${listModes()}`,
+          message.message_id
+        );
+        return res.status(200).json({ ok: true });
+      }
+
+      await sendMessage(chatId, `Mode ${next}: ${modeLabel(next)}`, message.message_id);
+      console.log(`🎭 Chat ${chatId} mode set to ${next}`);
+      return res.status(200).json({ ok: true });
+    }
+
     const commandMatch = text.match(/^\/(summary|roast)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     if (commandMatch) {
       const command = commandMatch[1].toLowerCase();
@@ -146,13 +197,12 @@ module.exports = async function handler(req, res) {
       const history = await getHistory(chatId);
 
       if (command === 'summary') {
-        const speaker = await selectCommandPersona(argument, history, line);
         await sendChatAction(chatId, 'typing');
-        const summary = await generateSummary(speaker, history);
+        const summary = await generateSummary(null, history, personas);
         if (summary) {
           const result = `Краткая выжимка:\n\n${summary}`;
-          const plainText = await sendPersonaReply(chatId, speaker, result, message.message_id);
-          await appendHistory(chatId, `${speaker.name}: ${plainText}`);
+          await sendMessage(chatId, result, message.message_id);
+          await appendHistory(chatId, `Система: ${result}`);
         }
         return res.status(200).json({ ok: true });
       }
@@ -192,67 +242,57 @@ module.exports = async function handler(req, res) {
     let personaToReply = null;
     let shouldReact = false;
     let shouldSelfCorrect = false;
+    const chatLevel = chatType === 'private' ? 5 : await getChatLevel(chatId);
+    const history = await getHistory(chatId);
 
     if (chatType === 'private') {
-      // В личке хозяин может тестировать ответы без риска написать в группу.
       personaToReply = mentionedPersona || personas[0] || null;
-    } else if (mentionedPersona) {
-      console.log(`👤 Mentioned persona matched: "${mentionedPersona.name}"`);
-      personaToReply = mentionedPersona;
+    } else if (chatLevel === 0) {
+      console.log('🔇 Level 0 — bot disabled');
     } else if (isReplyToBot) {
-      // Продолжаем от лица того же человека, чью предыдущую реплику цитируют.
-      const history = await getHistory(chatId);
       const repliedText = message.reply_to_message.text || '';
       const previousPersonaLine = [...history]
         .reverse()
         .find((entry) => entry.endsWith(`: ${repliedText}`));
-      personaToReply = personas.find((p) => previousPersonaLine?.startsWith(`${p.name}:`)) || personas[0];
-      console.log(`💬 Message is reply to bot, continuing as "${personaToReply?.name}"`);
+      personaToReply = personas.find((p) => previousPersonaLine?.startsWith(`${p.name}:`)) || pickRandomPersona();
+      console.log(`💬 Reply to bot — answering as "${personaToReply?.name}"`);
     } else if (isMentionedBot) {
-      // @username бота — явный вызов: отвечаем сразу, не ждём интервала 10–20 сообщений.
-      const history = await getHistory(chatId);
-      const decision = await decideResponder(personas, history, line);
-      personaToReply = personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase()) || personas[0];
-      console.log(`📣 Bot mentioned directly, replying as "${personaToReply?.name}"`);
+      const decision = await decideResponder(personas, history, line, 5);
+      personaToReply = pickPersonaFromDecision(decision) || mentionedPersona || pickRandomPersona();
+      console.log(`📣 Bot mentioned — answering as "${personaToReply?.name}"`);
+    } else if (mentionedPersona) {
+      // Имя персоны на level 1–5 — всегда.
+      personaToReply = mentionedPersona;
+      console.log(`👤 Persona mentioned — answering as "${mentionedPersona.name}"`);
     } else {
-      const isAutonomousTurn = await shouldMakeAutonomousReply(chatId);
-      console.log(`🎲 Autonomous reply interval: ${isAutonomousTurn ? 'reached' : 'not reached'}`);
+      const isAutonomousTurn = await shouldMakeAutonomousReply(chatId, chatLevel);
+      console.log(`🎲 Level ${chatLevel} autonomous: ${isAutonomousTurn ? 'yes' : 'no'}`);
       if (isAutonomousTurn) {
-        const history = await getHistory(chatId);
-        const decision = await decideResponder(personas, history, line);
-        console.log('🤖 Moderator decision:', decision);
-        if (decision.personaName) {
-          personaToReply =
-            personas.find((p) => p.name.toLowerCase() === decision.personaName.toLowerCase()) || null;
-        }
-
-        // Даже если модератор вернул кривой JSON, в назначенный ход
-        // всё равно появляется одна короткая реплика от случайной персоны.
-        if (!personaToReply && personas.length > 0) {
-          personaToReply = personas[Math.floor(Math.random() * personas.length)];
-          console.log(`🎲 Random chance triggered! Picked persona: "${personaToReply.name}"`);
-        }
-      } else if (!text.startsWith('/')) {
-        shouldSelfCorrect = await shouldMakeSelfCorrection(chatId);
+        const decision = await decideResponder(personas, history, line, chatLevel === 5 ? 5 : chatLevel);
+        personaToReply = pickPersonaFromDecision(decision) || pickRandomPersona();
+        console.log(`🤖 Autonomous reply as "${personaToReply?.name}"`);
+      } else if (!text.startsWith('/') && chatLevel >= 2) {
+        shouldSelfCorrect = chatLevel >= 4 && await shouldMakeSelfCorrection(chatId);
         if (shouldSelfCorrect) {
-          const history = await getHistory(chatId);
-          const decision = await decideResponder(personas, history, line);
-          personaToReply = personas.find((p) => p.name.toLowerCase() === decision.personaName?.toLowerCase())
-            || personas[Math.floor(Math.random() * personas.length)];
-          console.log(`✍️ Self-correction interval reached, picked "${personaToReply?.name}"`);
+          const decision = await decideResponder(personas, history, line, chatLevel);
+          personaToReply = pickPersonaFromDecision(decision) || pickRandomPersona();
         } else {
-          shouldReact = await shouldMakeReaction(chatId);
-          console.log(`✨ Reaction interval: ${shouldReact ? 'reached' : 'not reached'}`);
+          shouldReact = await shouldMakeReactionForMessage(chatId, chatLevel);
         }
       }
     }
 
     if (personaToReply) {
-      console.log(`🤖 Generating reply as persona "${personaToReply.name}"...`);
-      const history = await getHistory(chatId);
+      const chatMode = await getChatMode(chatId);
+      // В режиме cabluc иногда «запрещают» отвечать — молчим.
+      if (chatMode === 'cabluc' && Math.random() < 0.3) {
+        console.log('👠 Cabluc mode: reply forbidden this turn');
+        return res.status(200).json({ ok: true });
+      }
+
+      console.log(`🤖 Generating reply as persona "${personaToReply.name}" (mode=${chatMode})...`);
       const relationsContext = buildRelationsContext(personaToReply, history, line);
-      await sendChatAction(chatId, 'typing');
-      const reply = await generateReply(personaToReply, history, line, relationsContext);
+      const reply = await generateReply(personaToReply, history, line, relationsContext, personas, chatMode);
 
       if (reply) {
         console.log(`🚀 Reply generated successfully: "${reply}". Sending to Telegram...`);
@@ -272,15 +312,16 @@ module.exports = async function handler(req, res) {
       } else {
         console.log('⚠️ LLM returned empty reply.');
       }
+    } else if (shouldReact) {
+      const emoji = await decideReaction(history, line);
+        if (emoji) {
+          const reactionSet = await setMessageReaction(chatId, message.message_id, emoji);
+          console.log(reactionSet ? `✨ Set reaction ${emoji}` : `⚠️ Could not set reaction ${emoji}`);
+        } else {
+          console.log('ℹ️ Reaction skipped: no contextual emoji.');
+        }
     } else {
-      if (shouldReact) {
-        const history = await getHistory(chatId);
-        const emoji = await decideReaction(history, line);
-        const reactionSet = await setMessageReaction(chatId, message.message_id, emoji);
-        console.log(reactionSet ? `✨ Set reaction ${emoji}` : `⚠️ Could not set reaction ${emoji}`);
-      } else {
-        console.log('ℹ️ No persona chosen to reply for this message.');
-      }
+      console.log('ℹ️ No persona chosen to reply for this message.');
     }
 
     if (pendingBadge) {
