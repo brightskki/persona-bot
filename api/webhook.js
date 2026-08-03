@@ -2,6 +2,7 @@ const { personas, findByNameOrAlias, findAllMentioned, findByTelegramUsername } 
 const {
   appendHistory, getHistory, getChatLevel, setChatLevel, levelLabel,
   getChatMode, setChatMode, modeLabel, listModes,
+  getPipelineMode, isOptimizedPipeline,
   shouldMakeAutonomousReply, shouldMakeReactionForMessage, shouldMakeSelfCorrection,
   shouldAwardBadge, recordBadgeActivity, takeBadgeCandidate
 } = require('../lib/state');
@@ -244,12 +245,15 @@ module.exports = async function handler(req, res) {
     let shouldSelfCorrect = false;
     const chatLevel = chatType === 'private' ? 5 : await getChatLevel(chatId);
     const history = await getHistory(chatId);
+    const optimized = isOptimizedPipeline();
+    console.log(`⚙️ Pipeline: ${getPipelineMode()} (level=${chatLevel})`);
 
     if (chatType === 'private') {
       personaToReply = mentionedPersona || personas[0] || null;
     } else if (chatLevel === 0) {
       console.log('🔇 Level 0 — bot disabled');
     } else if (isReplyToBot) {
+      // Всегда в LLM (и в current, и в optimized).
       const repliedText = message.reply_to_message.text || '';
       const previousPersonaLine = [...history]
         .reverse()
@@ -257,21 +261,32 @@ module.exports = async function handler(req, res) {
       personaToReply = personas.find((p) => previousPersonaLine?.startsWith(`${p.name}:`)) || pickRandomPersona();
       console.log(`💬 Reply to bot — answering as "${personaToReply?.name}"`);
     } else if (isMentionedBot) {
-      const decision = await decideResponder(personas, history, line, 5);
-      personaToReply = pickPersonaFromDecision(decision) || mentionedPersona || pickRandomPersona();
+      // Всегда в LLM. В optimized не тратим cheap-вызов на выбор персоны.
+      if (optimized) {
+        personaToReply = mentionedPersona || pickRandomPersona();
+      } else {
+        const decision = await decideResponder(personas, history, line, 5);
+        personaToReply = pickPersonaFromDecision(decision) || mentionedPersona || pickRandomPersona();
+      }
       console.log(`📣 Bot mentioned — answering as "${personaToReply?.name}"`);
     } else if (mentionedPersona) {
-      // Имя персоны на level 1–5 — всегда.
+      // Имя персоны на level 1–5 — всегда в LLM.
       personaToReply = mentionedPersona;
       console.log(`👤 Persona mentioned — answering as "${mentionedPersona.name}"`);
     } else {
+      // Сначала дешёвый счётчик/рандом без LLM. В ИИ идём только если выпал ход.
       const isAutonomousTurn = await shouldMakeAutonomousReply(chatId, chatLevel);
       console.log(`🎲 Level ${chatLevel} autonomous: ${isAutonomousTurn ? 'yes' : 'no'}`);
       if (isAutonomousTurn) {
-        const decision = await decideResponder(personas, history, line, chatLevel === 5 ? 5 : chatLevel);
-        personaToReply = pickPersonaFromDecision(decision) || pickRandomPersona();
+        if (optimized) {
+          personaToReply = pickRandomPersona();
+        } else {
+          const decision = await decideResponder(personas, history, line, chatLevel === 5 ? 5 : chatLevel);
+          personaToReply = pickPersonaFromDecision(decision) || pickRandomPersona();
+        }
         console.log(`🤖 Autonomous reply as "${personaToReply?.name}"`);
-      } else if (!text.startsWith('/') && chatLevel >= 2) {
+      } else if (!optimized && !text.startsWith('/') && chatLevel >= 2) {
+        // Лишние LLM-фичи (опечатки/реакции) — только в current.
         shouldSelfCorrect = chatLevel >= 4 && await shouldMakeSelfCorrection(chatId);
         if (shouldSelfCorrect) {
           const decision = await decideResponder(personas, history, line, chatLevel);
@@ -279,6 +294,8 @@ module.exports = async function handler(req, res) {
         } else {
           shouldReact = await shouldMakeReactionForMessage(chatId, chatLevel);
         }
+      } else {
+        console.log('⏭️ Skip LLM — not an autonomous turn');
       }
     }
 

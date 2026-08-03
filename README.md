@@ -174,6 +174,7 @@ node scripts/setWebhook.js https://твой-проект.vercel.app/api/webhook
 
 - `HISTORY_LIMIT` — сколько последних сообщений чата держать в контексте (по умолчанию 500; для `/summary` нужно не меньше 500).
 - `DEFAULT_LEVEL` — стартовый level чата, если ещё не задавали `/level` (по умолчанию 1).
+- `PIPELINE_MODE` — `optimized` (по умолчанию): в LLM только когда реально отвечаем (@бот / реплай / имя / интервал level). `current`: прежнее поведение с cheap-decide и реакциями через LLM.
 - `SELF_CORRECTION_MIN_MESSAGES` / `SELF_CORRECTION_MAX_MESSAGES` — интервал редкой «опечатки → исправления» (по умолчанию 35–45 сообщений).
 - `BADGE_MIN_MESSAGES` / `BADGE_MAX_MESSAGES` — интервал выдачи накопившихся секретных ачивок (по умолчанию 100–200 сообщений).
 - `MAX_REPLY_CHARS` — жёсткая максимальная длина ответа (по умолчанию 140 символов, одна строка).
